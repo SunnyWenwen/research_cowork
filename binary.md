@@ -150,10 +150,43 @@ UUID 身分對應（從 config + audit + dxt URL 確認）：
 - **`cowork-gb-cache.json` = GrowthBook feature-flag 快取**：`cachedGrowthBookFeatures` 含大量 `tengu_*` 旗標；**Fable 5 停用訊息存於此**（`tengu-model-error-overrides → claude-fable-5: "Claude Fable 5 is currently unavailable…"`）。→ 模型可用性與功能開關由此份伺服器下發 flag 控制（與 host-loop 的數字 flag `lt("1143815894")` 為不同命名體系）。
 - **`cowork-clientdata-cache.json`**：bootstrap `client_data` 快取；`cwkCfgKeyForModel: {apiModel:"claude-sonnet-4-6[1m]", cwkCfgKey:null}` → 證實目前模型 Sonnet 4.6、prompt 變體 key = null（用 base，非 marigold），對上「Sonnet 無 send_user_message」結論。
 - **`cowork-policy-limits-cache.json`**：伺服器下發合規限制（`restrictions.allow_cobalt_plinth:false`、`enforce_web_search_mcp_isolation:false`、`compliance_taints:[]`）。
-- **`spaces.json`**：space 登錄表（每筆 `id/name/folders/projects/links/origin/時間`；name 常為資料夾路徑）→ spaceId ↔ 資料夾對映，Memory 分區依據。
+- **`spaces.json`**：space 登錄表（每筆 `id/name/folders/projects/links/origin/時間`；name 常為資料夾路徑）→ spaceId ↔ 資料夾對映，Memory 分區依據。**UI 顯示為「Projects」**（截圖證實 2026-06-14：UI 的 Projects 卡片 = spaces.json 條目；內部碼/資料叫 space、使用者介面叫 Project，同一物。space 內的 `projects[]` 子陣列為另一更細層級，實測空）。
 - **`artifacts.json`**：artifact 登錄表（`id/name/description/createdBySessionId/lastModifiedBySessionId/mcpTools/isStarred`）。
 
 注意：上述 cache 檔在複製當下若正被 App 寫入，會得到**截斷的 JSON**（本次 gb-cache/clientdata/spaces/artifacts 皆部分截斷，僅開頭可靠）。
+
+### GrowthBook flag 解讀（`cowork-gb-cache.json`，2026-06-14）
+
+`cachedGrowthBookFeatures` 含 250+ 個 `tengu_*` 旗標，多數為不可解代號（`tengu_<隨機詞>`）。以下為**可解讀、且對照得上機制**者（值為複製當下快照，檔案截斷於 ~19.7KB）：
+
+**印證既有機制：**
+| flag | 值 | 對照 |
+|---|---|---|
+| `tengu_pewter_kestrel` | `global:50000, Bash:30000, PowerShell:30000, Grep:20000, Snip:1000, StrReplaceBasedEditTool:30000, BashSearchTool:20000` | **各工具輸出 token 上限**（解釋工具結果截斷）|
+| `tengu_malort_pedway` | `hideBeforeAction:true, coordinateMode:"pixels", screenshotFilter:true` | computer-use 設定 |
+| `tengu_kairos_cron` / `_push_notifications` / `_input_needed_push` | true | Scheduled Tasks（內部代號 kairos）|
+| `tengu_mcp_elicitation` | true | 印證 MCP elicitation 支援 |
+| `tengu_grey_step2` | `dialogTitle:"We recommend medium effort for Opus"` | effort 機制 + 建議對話框 |
+| `tengu_worktree_mode` | true | git-worktrees.json / Agent isolation |
+| `tengu_review_bughunter_config` | `fleet_size:5, model:"claude-opus-4-7", total_wallclock_minutes:22` | subagent fleet（對應 2.1.177 forward diff 的 subagent/teammate）|
+| `tengu_bridge_*` / `tengu_ccr_bridge(_multi_session)` / `tengu_bridge_attestation_enforce_config` | `accept_level:"VERIFIED_BY_GATE"`、`min_version:"2.1.70"` | host↔VM / remote bridge（CCR）閘道與 attestation |
+| `tengu_hawthorn_window` / `tengu_sm_config` | `200000`；`minimumMessageTokensToInit:150000` | context 視窗 / 壓縮觸發 |
+
+**新揭露：**
+- `tengu_canary:{external:"2.1.177"}` → 證實 2.1.177 = canary（較新）版。
+- 模型開關：`tengu-fable-off-switch`、`tengu_velvet_hammer_haiku_4_5`、`tengu_velvet_mallet_sonnet`、`tengu_velvet_hammer_falcon`（新代號 **falcon**）；`bughunter` 用 `claude-opus-4-7`。
+- `tengu-top-of-feed-tip` / `tengu-model-error-overrides`：Fable 5 停用的 UI 文案與模型錯誤覆寫。
+- 官方 plugin：discord / telegram / fakechat / imessage（`claude-plugins-official`）。
+- 遙測：`tengu_1p_event_batch_config.path:"/api/event_logging/v2/batch"`；其他：`tengu_windows_credman`、`tengu_native_cursor`、`tengu_workflows_enabled`、`tengu_file_write_optimization`、`tengu_streaming_tool_execution2`。
+
+→ GrowthBook 是 Cowork/引擎的**伺服器端功能旗標系統**，本地快取於此檔；模型可用性、工具上限、computer-use、排程、bridge、壓縮等都受其控制。多數代號需配合 bundle 交叉比對才能解義。
+
+**引擎讀取的 flag（`Y8("flag",default)` getter，2.1.177，2026-06-14）**：引擎共讀 **218** 個 `tengu_*`。可解讀者多為叢集：
+- `tengu_bg_*`（~10 個：`auto_background_agents`、`bg_attach_*`、`bg_binary_takeover`、`bg_prewarm_per_sweep`、`bg_spare_enable`、`bg_classifier_config`…）= **背景 agent 子系統**（對應 2.1.177 forward diff 的 `pending_background_agent_count`）。
+- `tengu_bridge_*` / `tengu_ccr_*` = host↔VM / remote bridge（見 features.md「Local vs Remote」）。
+- `tengu_bash_allowlist_strip_all` / `tengu_ant_yolo_equiv_strip_config` = bash 權限 allowlist 相關。
+- 已解單例：`tengu_harbor`（plugin marketplace gate）、`tengu_kestrel_arch`（本機/遠端執行提示）。
+- 其餘上百個為 `amber_*`/`basalt_*`/`cedar_*`/`slate_*` 等顏色實驗代號，**僅憑名稱不可解**，需逐一比對使用處。
 
 ## ★ app.asar 解包分析（2026-06-13）
 
@@ -492,4 +525,62 @@ function Jfr({vmProcessName, hostLoopMode, hostCwd, spSectionPrompts}) {
 **MCP 協議版本**：
 ```javascript
 LATEST_PROTOCOL_VERSION = "2025-11-25";
-SUPPORTED
+SUPPORTED_PROTOCOL_VERSIONS = [
+  "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"
+];  // 向後相容 5 個版本
+```
+
+**主要類別**：
+
+| 類別 | 說明 |
+|---|---|
+| `StreamableHTTPClientTransport` | Streamable HTTP 傳輸（相對於 stdio/SSE；支援流式回應） |
+| `Protocol` | MCP 協議主類別（請求/回應/通知處理） |
+| `McpError` | MCP 錯誤類（含 `ErrorCode.UrlElicitationRequired = -32042`） |
+| `UrlElicitationRequiredError` | OAuth 流程需使用者開啟 URL 時拋出 |
+
+**進階功能支援**：
+- **Sampling**（`sampling.createMessage`）：MCP server 可向 LLM 請求補全（server-initiated LLM call）
+- **Elicitation**（`elicitation.create`）：MCP server 可向使用者請求輸入（server-initiated user prompt）
+- **OAuth**：`OAuthProtectedResourceMetadataSchema`、`UrlElicitationRequired` 錯誤碼，完整 OAuth 2.0 保護資源流程
+- **TaskSupport**（capabilities schema）：MCP server 宣告 sampling / elicitation 能力
+
+**錯誤碼（`ErrorCode`）**：
+- `-32042`: `UrlElicitationRequired`（OAuth，需使用者互動）
+- 標準 JSON-RPC 錯誤碼 + MCP 自訂碼
+
+---
+
+### ★ 引擎 binary strings 確認（2.1.170 ELF，2026-06-13）
+
+來源：`strings` + grep 分析 `claude-code-vm/2.1.170/claude`。
+
+`nm` 方法：ELF 符號表只含 V8/Node.js C++ 符號（1068 個），無 JS 邏輯；改用 `strings` 提取嵌入字串。
+
+確認存在的關鍵字串：
+
+| 字串 | 歸屬 | 意義 |
+|---|---|---|
+| `queue-operation` | 引擎層 | session JSONL 記錄類型（Cowork 新增） |
+| `last-prompt` | 引擎層 | session JSONL 記錄類型 |
+| `deferred_tools_delta` | 引擎層 | ToolSearch attachment 欄位 |
+| `total_deferred_tools` | 引擎層 | deferred 工具數統計 |
+| `attachmentSent` | 引擎層 | attachment 記錄狀態 |
+| `attachment_` | 引擎層 | attachment 記錄前綴 |
+
+→ 這些字串全在引擎 binary（2.1.170）內，確認是**引擎層**功能，非 App 層。  
+→ 由此推論：Claude Code ≥2.1.170 版本也會有相同的 `queue-operation`/`last-prompt`/`attachment` 記錄類型（因為共用引擎）。
+
+**2.1.70 比對狀態**：姊妹專案的 Claude Code 2.1.70 binary（`C:\Users\User\.local\share\claude\versions\2.1.70`）不在 VM 掛載範圍內，無法直接比對。需使用者手動複製到 `research_cowork/` 才能分析。
+
+---
+
+## 待研究
+
+- `@anthropic-ai/conway-client` 用途（Conway = 哪個功能的代號？）
+- `effort` 參數的具體值範圍與 extended thinking 的對應
+- Remote session 的 RFB 實作（`@ant/rfb-client` 如何連接遠端 VM？）
+- `gVisor` 在 Cowork VM 中的確切角色（外層 HCS 已隔離，gVisor 在 VM 內部再加一層？）
+- `vmEgressPolicy()` 的企業 MDM 設定格式
+- bootstrap 回應的 `client_data` 完整欄位結構
+- Claude Code 2.1.70 binary 與 2.1.170 的字串比對（確認 queue-operation 等是否為新增）

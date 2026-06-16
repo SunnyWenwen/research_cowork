@@ -42,9 +42,38 @@ session 開始時以 `<system-reminder>` 列名稱（無 schema），對應 JSON
 
 ### ToolSearch 行為（實測）
 
-- 載入前直接呼叫 deferred 工具會 `InputValidationError`
-- `select:A,B,C` 一次載入多個；回傳格式為 `<functions>` 區塊內的 JSONSchema（與 system prompt 開頭工具清單同編碼）
-- MCP server 指示（如 computer-use 的使用說明）隨 system prompt 提供，建議「整組載入」（關鍵字匹配 server 名稱子字串）
+**參數（pre-loaded schema，即時內省 2026-06-15）**——只有兩個：
+
+- `query`（必填 string）。三種寫法：
+  - `select:Read,Edit,Grep` — 用**確切工具名**直接抓（逗號分隔多個），最精準
+  - `notebook jupyter` — **關鍵字**搜尋，回最相符前 N 個
+  - `+slack send` — `+詞` 表示**名稱必含** "slack"，其餘詞排序
+- `max_results`（選填 number，預設 5）— 最多回幾個工具的 schema
+
+**回傳**：`<functions>` 區塊內的 JSONSchema（與 system prompt 開頭工具清單同編碼）；schema 一出現在結果裡該工具即可呼叫。
+
+**可一次載一大批（實測確認）**：`select:` 可帶長串名稱；或關鍵字配大的 `max_results`（如 `query:"computer-use", max_results:30`，因關鍵字比對工具名/server 名子字串，一發即整組 ~27 個 schema 全入）。system prompt 明確建議 computer-use / Claude in Chrome 這類「整組載入，別逐個 select」。**取捨**：每個 schema 進來都佔 context token，會抵消 deferred 省 token 的初衷；確定要用的整組一次載 OK，不確定的別預先全灌。
+
+### ★ deferred 工具的「名稱」與「schema」走不同通道（2026-06-15 實測，本 session JSONL）
+
+問題起點：使用者問「schema 是用 tool result 放進 context，還是其他方式？」→ 查本 session JSONL `attachment` 記錄定論：
+
+| 內容 | 傳遞通道 | 證據 |
+|---|---|---|
+| 工具**名稱** | `attachment` 記錄的 `deferred_tools_delta`（`addedNames`/`addedLines`，本 session 89 筆，**只有名字無 schema**）→ 渲染成開場的 `<system-reminder>` deferred 清單 | JSONL attachment record |
+| 工具**完整 schema** | **ToolSearch 的 tool result**（`<functions>` 區塊），以 tool_result 形式留在對話 context | 本 session 載 `select:TaskCreate,TaskUpdate` 收到 |
+
+- 同一批 `attachment` 還用 delta 灌入：`agent_listing_delta`（6 種 agent）、`mcp_instructions_delta`（computer-use 使用說明 4863 字元）、`skill_listing`（53 個 skill 描述 25451 字元）。→ Cowork **開場大量「清單/說明」都靠 attachment delta 注入 context**，非寫死在 system prompt。
+- **關鍵分辨**：context 裡有沒有 schema，只影響「**模型**能否正確帶參數」，不影響「引擎**能否執行**」——真正的工具註冊與參數驗證在引擎/MCP host 端（握有所有已連接工具真實 schema）。故無參數的 deferred 工具，不載 schema 也能直接呼叫成功（見上方 deferred≠不可呼叫的更正）。
+- 一句話：**名稱走 attachment delta（system-reminder），schema 走 ToolSearch tool result**；兩者都只是「給模型看的副本」，執行端權威 schema 一直在引擎那邊。
+
+### 「目前已載入哪些 schema」沒有可查詢的登記處（2026-06-15 實測）
+
+問題起點：使用者問「你怎麼知道當前已載入哪些 tool 的 schema？有額外的地方紀錄嗎？」
+
+- **模型側：無登記處、無計數器、無 `list_loaded_tools`**。模型判斷「已載入哪些 schema」唯一依據是**掃自己的 context**：(a) prompt 最上方 pre-loaded 函式區塊 + (b) 本對話內每次 ToolSearch 回傳且仍在 context 的 `<functions>` 區塊。若某 ToolSearch 結果因 compaction 被擠出 context，模型即「失憶」，須重新 ToolSearch。
+- **引擎側：有紀錄，但記的是「可搜尋的 deferred 名單」，非「已載入 schema」**。本 session JSONL 僅開場 1 筆 `deferred_tools_delta`（added 89 / removed 0），欄位 `addedNames / addedLines / removedNames / readdedNames / pendingMcpServers`——**無任何「已載入 schema 計數/清單」欄位**。`removedNames`/`readdedNames` 的存在證明此名單是**會變動的執行期狀態**（如對話中途 plugin 的 `authenticate` 工具，係 MCP server 陸續連上後才新增進名單）。
+- **結論**：「已載入 schema」狀態**只存在於模型 context**（暫時、以 tool_result 文字存在），無權威外部帳本；引擎 JSONL 記的是 deferred **名單**增減，不是 schema 載入狀態。實務：不確定某 schema 在不在，**直接再 ToolSearch 一次最保險**（冪等，重新回 schema）。
 
 ## Skill 系統
 
@@ -52,12 +81,63 @@ session 開始時以 `<system-reminder>` 列名稱（無 schema），對應 JSON
 - 路徑：Windows `AppData\Roaming\Claude\local-agent-mode-sessions\skills-plugin\...`；VM 內 `/sessions/{name}/mnt/.claude/skills/`（ro）
 - 內建 skill：docx / pdf / pptx / xlsx / schedule / setup-cowork / skill-creator / session 相關 + plugin 提供的 skill（`cowork-plugin-management:*`）
 - system prompt 強制規範「先研究、後讀 output-format skill」的順序（防止先被文件格式 anchoring）
+- **Skill 來源僅「全域/帳號層」三種，無資料夾 local（2026-06-14 實測）**：(1) 內建快取、(2) 安裝的 plugin、(3) Settings > Capabilities 的 user skill。實測把 `SKILL.md` 丟進連接資料夾 `research_cowork/.claude/skills/` 與引擎 cwd `outputs/.claude/skills/`，`/reload-skills` 後**皆不出現** → **Claude Code 的「專案 `cwd/.claude/skills/` = project-local skill」機制，Cowork 未開放**。
+  - **安全理由**：連接資料夾/scratch 可能含不受信任的使用者檔；若自動載入其中的 SKILL.md，等於任何資料夾都能注入「會自動觸發的能力」（prompt-injection / 自我提權破口）。故 Cowork 只認經核准/安裝的來源——與「agent 不能自我裝 plugin/connector/skill」同一道防線。
+- **skill global/local 對照**：Cowork = 全部 global（帳號層，跨所有 Project/session）；Claude Code = 另有 project-local（`cwd/.claude/skills`）與 personal（`~/.claude/skills`）。
 
 ## MCP 架構觀察
 
 - Cowork 把平台功能本身也做成 MCP server：`cowork`、`workspace`、`visualize`、`session_info`、`scheduled-tasks`、`mcp-registry`、`plugins`、`skills`、`computer-use` 等，與外部 connector（Gmail 等）同一機制
-- 外部 connector 的 server 名稱用 uuid（如 `mcp__5f1729b4-...__search_threads`），平台內建 server 用語意名稱 — 可作為區分特徵
 - system prompt 指示 agent 主動查 registry 並建議 connector（`search_mcp_registry` → `suggest_connectors`），這是 Claude Code 沒有的「工具自我擴充」流程
+
+### MCP server 三種來源 / 命名慣例（2026-06-15 補：新增第三種）
+
+| 來源 | server 名稱範例 | tool 名稱前綴 | 觀察 |
+|---|---|---|---|
+| **平台內建** | `cowork`、`workspace`、`visualize`、`session_info`、`scheduled-tasks`、`mcp-registry`、`plugins`、`skills`、`computer-use`、`cowork-onboarding`、`Claude in Chrome` | `mcp__cowork__*` 等語意名 | Cowork 平台功能本身，每個 session 必有 |
+| **使用者連接的 connector** | uuid，如 `a8d37d66-a993-4cd6-badf-76497f1ae1c3`（Notion）、`5f1729b4-...`（Gmail，6/12 session） | `mcp__{uuid}__*` | 使用者在 Settings 連接的外部服務，server 名是 uuid（非語意名）；**每個 session 視帳號連了什麼而不同** |
+| **plugin 內建（NEW）** | `plugin:engineering:slack`、`plugin:engineering:github`、`plugin:finance:bigquery` … | `mcp__plugin_engineering_slack__*`（`:` → `_`） | 安裝的 **plugin 隨附**的 MCP server；命名帶 `plugin:{plugin}:{server}` 前綴 |
+
+→ 三種可由名稱一眼區分：**語意名 = 平台**、**純 uuid = 使用者 connector**、**`plugin:` 前綴 = plugin 隨附**。
+
+### Plugin 內建 MCP server（2026-06-15 即時內省）
+
+本 session 安裝了 `engineering` 與 `finance` 兩個 plugin，各自 **bundle 了一組 MCP server**：
+
+- **`engineering` plugin**：`asana`、`atlassian`、`datadog`、`github`、`linear`、`notion`、`pagerduty`、`slack`（8 個）
+- **`finance` plugin**：`bigquery`（1 個）
+
+機制觀察：
+
+- **延遲連接**：session 開頭這些 server 標為「still connecting」，其 `mcp__plugin_*__*` 工具尚未就緒；system-reminder 指示「即使使用者沒點名，若請求可能用到就用關鍵字呼叫 ToolSearch，它會等待 connecting server 連上再搜」。
+- **OAuth 流程工具**：連上後先露出的是 `authenticate` / `complete_authentication` 一對工具（如 `mcp__plugin_engineering_slack__authenticate`），即需使用者授權的 connector 採 MCP elicitation/OAuth 流程（呼應 directMcpHost 的 `UrlElicitationRequired`）。
+- **plugin ≠ 一定帶 MCP server**：同 session 也裝了 `brightdata-plugin`（純 skill，無 MCP server）、`cowork-plugin-management`、`cowork-session-analyze`、`anthropic-skills`（提供 docx/pdf/pptx/xlsx/schedule/skill-creator 等 skill）。即 plugin 可只帶 skill、只帶 MCP server、或兩者皆有。
+- 對照 6/12 的「12 個 MCP server」權威清單：本 session 在平台內建 + connector 之外，**又多出 9 個 plugin-bundled server**，總數明顯更多。可見 MCP server 清單**高度依 session 當下的帳號 plugin/connector 設定**而變。
+
+### `mcp__` 前綴 ≈ 「Cowork 平台工具（App 層）vs 引擎原生」的分界（2026-06-15）
+
+問題起點：使用者問「包成 MCP server 的內建工具是不是大多是 Cowork 的，而非原生引擎（Claude Code）工具？」→ 是，且有結構性原因。
+
+| 類別 | 判別 | 工具 |
+|---|---|---|
+| **引擎原生**（與 Claude Code 共用） | **無** `mcp__` 前綴 | `Read`/`Write`/`Edit`/`Glob`/`Grep`/`Agent`/`AskUserQuestion`/`Skill`/`ToolSearch`/`TaskCreate/Get/List/Stop/Update`/`WebSearch` |
+| **Cowork 平台工具**（App 層，包成 MCP server） | **有** `mcp__` 前綴 | `cowork`/`visualize`/`session_info`/`scheduled-tasks`/`mcp-registry`/`plugins`/`skills`/`cowork-onboarding`/`computer-use`/`Claude in Chrome`/`workspace` |
+
+**深層原因**：這批之所以非得包成 MCP server，是因為它們要碰**引擎（尤其沙盒內）碰不到的東西**——GUI 渲染（artifact/widget/present_files）、OS/桌面（computer-use）、瀏覽器擴充（Claude in Chrome）、跨 session 檔案（session_info）、host 排程（scheduled-tasks）、connector 註冊（mcp-registry）。Cowork 用「平台功能即 MCP server」把 **host/GUI 側能力暴露給引擎**，故「被包成 MCP」與「Cowork 專屬、非引擎原生」高度相關。對照 Claude Code：`mcp__` 前綴專留給使用者外接的 MCP server，原生工具（Bash/Read…）無前綴——Cowork 拿同機制來掛**平台自身**功能，是 Cowork 的設計選擇。
+
+**兩個但書**：
+1. `mcp__workspace__bash`/`web_fetch` 是「核心能力被 MCP 橋接」的特例：Shell/抓網頁在 Claude Code 是**引擎原生**（`Bash`/`WebFetch`，無前綴），Cowork 改成 MCP 是為了跨進隔離 VM 執行 → 「被包成 MCP」≠「非核心能力」。
+2. App/引擎界線**隨版本漂移**：`ArtifactTool`/`ProjectsTool` 在 2.1.177 下沉進引擎（170 仍 App 層，見 binary.md）→ 此前綴分界是「當前版本快照」，非永久歸屬。
+
+### 跨 session 環境差異（提醒：清單會變）
+
+| 面向 | 6/12 記錄 | 本 session（6/15） |
+|---|---|---|
+| 模型 | Sonnet 4.6 → Fable 5 | **Opus 4.8**（`claude-opus-4-8`） |
+| 使用者 connector | Gmail（`5f1729b4-…`） | Notion（`a8d37d66-…`） |
+| plugin-bundled server | （未觀察到） | engineering ×8 + finance ×1 |
+
+→ 結論：tools.md 的「權威清單」是**某一 session 的快照**，工具/server 組合會隨模型、已連 connector、已裝 plugin 變動；驗證機制時應同時記錄觀察日期與當時的模型/plugin 狀態。
 
 ## ★ 權威清單（binary 層，audit.jsonl 的 system/init）
 
@@ -72,6 +152,23 @@ session 開始時以 `<system-reminder>` 列名稱（無 schema），對應 JSON
 → `heapdump`、`insights`、`goal`、`team-onboarding`、`usage`、`context` 等為內省未見的內建指令。
 
 其他 init 欄位：`model: claude-fable-5`、`apiKeySource: none`、`output_style: default`、`memory_paths.auto`、`plugins[]`（附 inline 路徑）、`fast_mode_state: off`。
+
+## `/` slash 輸入行為（2026-06-14，使用者實測）
+
+- 可用指令集 = session 的 `slashCommands` 陣列（`system/init` 下發的完整 24 個）+ 內建動作(`add-files`/`export`)；GUI 下拉底部「Type to filter」→ 是**可過濾視圖**，預設只露 6 項，非白名單。
+- **嚴格 exact-match 驗證**：打不存在/近似的指令（實測 `/contextd`、`/context.`）→ 跳 **「Unknown skill: X」並把訊息卡掉（不送出、不當文字發出）**。修正先前「沒匹配就當文字送」的錯誤推測。
+- 推論（未完全實測）：有註冊但沒列在預設視圖的指令，打全名應可過濾出並執行；待以 `/usage` 等已註冊全名驗證。
+- 對照 Claude Code：引擎 slash 機制共用（`clear`/`compact`/`context`/`init`/`review` 等重疊），但 Cowork 為 GUI 可過濾下拉 + 混入桌面動作/skill + exact-match 卡訊息；Claude Code 為 CLI 文字自動完成。
+
+## 工具兩大類：渲染 UI vs 做事/取資料（2026-06-14）
+
+Cowork 工具的一個明顯特徵：**一大類工具的「輸出」就是在對話渲染 UI 元件**（呼叫=畫卡片/widget），而非回傳資料。
+
+- **渲染型（agent→GUI 的繪圖指令）**：`present_files`(檔案卡)、`show_widget`(SVG/HTML)、`AskUserQuestion`(選擇題)、`list_skills`/`suggest_skills`、`list_connectors`/`suggest_connectors`、`list_plugins`/`suggest_plugin_install`、`create_artifact`/`update_artifact`、`show_onboarding_role_picker`、`TaskCreate`/`TaskUpdate`(驅動 Progress widget)。呼叫後 agent 收到的是 JSON 摘要，使用者看到的是 App renderer 畫的原生元件。
+- **做事/取資料型**：`bash`、`web_fetch`、`WebSearch`、`Read`/`Write`/`Edit`/`Glob`/`Grep`、`scheduled-tasks`、`session_info`、`Agent`、`ToolSearch`、`Skill`。
+- **中間地帶**：`request_cowork_directory`/`allow_cowork_file_delete`(觸發原生對話框)、`read_widget_context`(反向**讀** UI 狀態)。
+
+→ 渲染型工具幾乎都是 **Cowork 專屬**（Claude Code 為 CLI、輸出以文字為主）。本質上 Cowork 把「渲染某 UI 元件」也包裝成 MCP 工具，呼應「平台功能即 MCP server」：其中很大一部分 server 的職責就是把 GUI 渲染能力暴露給 agent。
 
 ## 與 Claude Code 工具系統差異總表
 
@@ -114,6 +211,62 @@ SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-1
 **關鍵推論**：Cowork connector MCP server（如 Gmail）理論上可利用 sampling 直接觸發 LLM 補全，或用 elicitation 要求使用者輸入，無需 agent 主動呼叫——這是 MCP 2025-11-25 協議的新能力。
 
 **與 Claude Code 的關係**：引擎層（2.1.170 ELF）也含有 MCP 相關字串，但 `directMcpHost.js` 是 App 層的 MCP client（負責連接外部 connector server）；引擎的 MCP 機制處理 sub-agent 工具呼叫路由。兩層各有 MCP 實作。
+
+## ★ 平台內建工具完整清單（即時內省，2026-06-15，Opus 4.8）
+
+範圍：**僅平台內建**——含 pre-loaded、deferred、及平台內建 MCP server 的所有 tool。**不含**使用者 connector（Notion uuid）與 plugin-bundled server（`plugin:*`）的 tool。
+
+### A. Pre-loaded（14，session 開場即有完整 schema）
+
+非 MCP（引擎原生 6）：`Agent`、`AskUserQuestion`、`Edit`、`Glob`、`Grep`、`Read`、`Skill`、`ToolSearch`、`Write`（按字母 9 個）。
+平台 MCP（5）：`mcp__cowork__present_files`、`mcp__visualize__read_me`、`mcp__visualize__show_widget`、`mcp__workspace__bash`、`mcp__workspace__web_fetch`。
+
+### B. Deferred — 非 MCP 引擎工具（6）
+
+`TaskCreate`、`TaskGet`、`TaskList`、`TaskStop`、`TaskUpdate`、`WebSearch`。
+
+### C. Deferred — 平台內建 MCP server 及其 tool
+
+| server | tool（`mcp__{server}__` 前綴省略） | 數 |
+|---|---|---|
+| `workspace` | `bash`、`web_fetch`（皆 pre-loaded） | 2 |
+| `cowork` | `present_files`(pre-loaded)、`create_artifact`、`update_artifact`、`list_artifacts`、`request_cowork_directory`、`allow_cowork_file_delete`、`read_widget_context` | 7 |
+| `visualize` | `read_me`、`show_widget`（皆 pre-loaded） | 2 |
+| `session_info` | `list_sessions`、`read_transcript` | 2 |
+| `scheduled-tasks` | `create_scheduled_task`、`list_scheduled_tasks`、`update_scheduled_task` | 3 |
+| `mcp-registry` | `list_connectors`、`search_mcp_registry`、`suggest_connectors` | 3 |
+| `plugins` | `list_plugins`、`search_plugins`、`suggest_plugin_install` | 3 |
+| `skills` | `list_skills`、`suggest_skills` | 2 |
+| `cowork-onboarding` | `show_onboarding_role_picker` | 1 |
+| `computer-use` | `screenshot`、`cursor_position`、`mouse_move`、`left_click`、`right_click`、`middle_click`、`double_click`、`triple_click`、`left_click_drag`、`left_mouse_down`、`left_mouse_up`、`scroll`、`key`、`hold_key`、`type`、`wait`、`zoom`、`read_clipboard`、`write_clipboard`、`open_application`、`switch_display`、`list_granted_applications`、`request_access`、`request_teach_access`、`teach_step`、`teach_batch`、`computer_batch` | 27 |
+| `Claude in Chrome`（server 名 `Claude_in_Chrome`） | `navigate`、`read_page`、`get_page_text`、`find`、`computer`、`form_input`、`file_upload`、`upload_image`、`javascript_tool`、`read_console_messages`、`read_network_requests`、`resize_window`、`gif_creator`、`tabs_context_mcp`、`tabs_create_mcp`、`tabs_close_mcp`、`browser_batch`、`shortcuts_list`、`shortcuts_execute`、`list_connected_browsers`、`select_browser`、`switch_browser` | 22 |
+
+**平台內建 server = 11 個**（workspace、cowork、visualize、session_info、scheduled-tasks、mcp-registry、plugins、skills、cowork-onboarding、computer-use、Claude in Chrome）。
+**平台內建 tool 合計**：pre-loaded 14 + deferred 非 MCP 6 + deferred MCP（cowork 餘 6 + session_info 2 + scheduled-tasks 3 + mcp-registry 3 + plugins 3 + skills 2 + cowork-onboarding 1 + computer-use 27 + Claude in Chrome 22 = 69）= **89**。
+
+備註：`computer_batch`/`browser_batch`/`teach_batch` 為「批次包裝」工具（一次送多個原子動作）；`read_me`/`show_widget`、`present_files`、artifact 系列等渲染型工具見上方「渲染 UI vs 做事」分類。
+
+### pre-loaded / deferred 是「逐工具」而非「逐 server」（2026-06-15 釐清）
+
+同一個 MCP server 的工具可被拆到 pre-loaded 與 deferred 兩邊——**`cowork` server 即被拆開的例子**：
+
+- pre-loaded 僅 `present_files`（1 個）
+- deferred 為其餘 6 個：`create_artifact`、`update_artifact`、`list_artifacts`、`request_cowork_directory`、`allow_cowork_file_delete`、`read_widget_context`
+
+對照：`workspace`（bash/web_fetch）、`visualize`（read_me/show_widget）兩 server **整組** pre-loaded；其餘平台 server（session_info、scheduled-tasks、mcp-registry、plugins、skills、cowork-onboarding、computer-use、Claude in Chrome）**整組** deferred。
+
+→ 選 pre-loaded 的判準是「高頻 / 開場常用」的單一工具（呈現結果用的 `present_files`、`bash`、`web_fetch`、視覺化、加上引擎原生 Read/Write/Edit/Skill/ToolSearch…）；專門或重量級工具（artifact、排程、computer-use 等）放 deferred。劃分粒度 = 單一工具的 **schema 是否進 context**，不是 server。
+
+#### ⚠️ 更正：「deferred ≠ 不可呼叫」（2026-06-15 實測，先前過度宣稱）
+
+先前把「deferred」寫成「需先 ToolSearch 才能用」是**未驗證的過度宣稱**。實證測試推翻之：
+
+- **測試**（本 session，未先 ToolSearch）：直接呼叫 deferred 的 `mcp__cowork__list_artifacts`、`mcp__session_info__list_sessions` → **兩者皆成功回傳資料，無 InputValidationError**。
+- **結論（實測）**：deferred 只是「**不把該工具的 schema 放進我的 context**」的省 token 設計，**不是把工具鎖住**。
+- **機制（推論，非實測）**：底層 MCP host 仍握有所有已連接工具的真實 schema；我送出呼叫時引擎拿參數去比對 host 端 schema。上述兩工具**無必填參數**，送空參數即通過 → 直接執行。
+- **system-reminder 警告「直接呼叫會 InputValidationError」真正會中的對象 = 需要參數的工具**：沒 schema 在 context 就猜不出正確參數，才驗證失敗；無參數工具天生不會中。故那句警告對「需參數的 deferred 工具」成立，對「無參數的 deferred 工具」不成立。
+- **保留成立的部分**：schema 載入確為逐工具（開場 cowork 群組僅 `present_files` 有 schema，其餘 6 個僅列名）——「per-tool 而非 per-server」對 **schema 是否進 context** 仍正確；被更正的只是「deferred 是否等於不可呼叫」。
+- 待補測：對一個**有必填參數**的 deferred 工具直接送空/亂參數，確認回的是 InputValidationError（以完整證實機制）。
 
 ## 待研究
 

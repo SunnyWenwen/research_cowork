@@ -45,12 +45,20 @@ Windows 資料夾經 **virtiofs + FUSE** 掛載進 VM，根在 `/mnt/.virtiofs-r
 |---|---|---|
 | `research_cowork/` | 使用者連接的資料夾（C:） | rw |
 | `reseach_claude_code/` | 使用者連接的資料夾（D:） | rw |
-| `outputs/` | session 暫存輸出區 | rw |
+| `outputs/` | session 暫存輸出區 | rw（**亦禁刪**） |
 | `uploads/` | 使用者上傳檔案 | **ro** |
 | `.auto-memory/` | Memory 目錄 | **ro**（agent 的 Write 工具走 Windows 端寫入，bash 端唯讀） |
-| `.claude/projects/` | **session JSONL 目錄** | **ro** |
+| `.claude/projects/` | **session JSONL 目錄**（延遲快照） | **ro** |
 | `.claude/skills/` | Skills 目錄 | **ro** |
-| `.remote-plugins/plugin_*/` | 已安裝 plugin | **ro** |
+| `.remote-plugins/plugin_*/` | 已安裝 plugin **內容**（host `rpm\plugin_{id}\`） | **ro** |
+
+> **`.claude` 為「選擇性掛載」**（2026-06-14 實證）：底下**只掛 `projects` + `skills`**，同層的 `tasks`/`sessions`/`backups` **不掛**。`.remote-plugins` 也只掛各 `plugin_*/` 內容，**父層 `rpm\manifest.json`（plugin 登錄）不掛**。
+
+#### 刻意「不」掛載（留在受保護 App 區、agent 無法存取）
+
+`audit.jsonl`、`local_{uuid}.json`、`config.json`、`.audit-key`、`.claude/{tasks,sessions,backups}`、`rpm\manifest.json`、`spaces.json`/`artifacts.json`/`cowork-gb-cache.json` 等帳號層快取、App data 目錄本體。
+
+**規律**：掛進來的只有「agent 跑任務需要的內容」（連接資料夾、scratch、Memory、引擎 transcript、skill/plugin 內容）；所有「管理 / 稽核 / 登錄 / 設定」檔一律不掛。連接資料夾與 `outputs` 可寫，其餘掛載多為 ro。
 
 重要發現：
 
@@ -100,6 +108,8 @@ Anthropic：*.anthropic.com, anthropic.com, claude.com, *.claude.com
 
 `local_{uuid}.json` 另有 `webFetchAllowedUrls`（44 條），內容**恰好是本 session 經 WebSearch/web_fetch 接觸過的 URL**（含我這場查過的 how-we-contain-claude 等）。→ `web_fetch` 與 bash curl 是**兩套不同的網路限制**：curl 受 egress domain allowlist；web_fetch 走 App 層、按 search 結果動態擴充可存取 URL（回答原待研究項）。
 
+**實證（2026-06-14）**：即時做 `web_fetch https://example.com` + `WebSearch`，再請使用者複製本 session live `local_json` → `webFetchAllowedUrls`(list,15 筆)**同時新增了** `https://example.com/`（web_fetch）**與該次 WebSearch 的多個結果 URL**（anthropic.com/product/claude-cowork、medium、tessl.io…）。→ 坐實「**web_fetch 抓取 + WebSearch 結果 URL 皆會被加入此動態白名單**」（原為推斷）。附帶再次印證掛載 JSONL 為延遲快照：當下該 fetch 未出現在 VM 可讀的 `.claude/projects` jsonl（仍停 502 行），記錄落在 App 層 local_json。
+
 ## ★ VM 內部組成（即時內省，2026-06-14）
 
 來源：bash 在 VM rootfs 探測（`find -xdev`、`file`、`/proc/self/status`）。**修正「VM 只是執行 bash 的笨 shell」之簡化印象——VM 內有完整引擎 + 協調 daemon。**
@@ -145,4 +155,15 @@ TD() = (requireCoworkFullVmSandbox===true || forceDisableHostLoop) ? false   // 
 
 來源：[How we contain Claude across products](https://www.anthropic.com/engineering/how-we-contain-claude)
 
-- **VM 實作**：Windows 用 HCS（Host C
+- **VM 實作**：Windows 用 HCS（Host Compute Service）、macOS 用 Apple Virtualization framework（解答原待研究項）
+- **host-mode 架構**：agent loop 在主機執行、僅程式碼執行在 VM（原為 full-VM mode，因 VM 啟動失敗會讓 Cowork 整個不可用而改）——證實檔案工具（主機/Windows 路徑）與 bash（VM）的雙軌觀察
+- **掛載模式**：read-only / read-write / **read-write-no-delete**（連接資料夾預設後者，rm 被 FUSE 擋，見 features.md 檔案刪除權限）
+- **VM 內另有防禦性 MITM proxy** 攔截 api.anthropic.com 流量（只放行本 VM 的 session token）
+- 憑證留在主機 keychain，VM 只拿 per-session scoped token
+- 本機 MCP server 在主機執行（非 VM 內）
+
+## 待研究
+
+- 主機端 proxy 的完整 allowlist 清單與設定位置
+- `web_fetch` 工具與 bash curl 的限制差異
+- 六大隔離機制的完整清單（官方圖未逐項列出）
