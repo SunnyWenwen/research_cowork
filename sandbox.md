@@ -88,6 +88,21 @@ bwrap 內無直接網路（`--unshare-net`），所有流量強制走 proxy：
 
 實測（2026-06-12，curl）：pypi/npm/github/docs.claude.com 通；example.com/google.com 擋（000）。
 
+**bash 能不能打 API POST？（2026-06-15 實測，問題起點：使用者問「可以用 bash 打 api post 嗎」）**
+
+- **能，且閘門是「網域」不是「HTTP method」**：`POST https://pypi.org/` 回 **405**（伺服器層回應 → 連線確實到達，POST 沒被攔）；`POST https://httpbin.org/post` 回 **000/exit 56**（被 proxy 擋，未出 VM）。→ POST/GET/PUT 對白名單內網域皆可，白名單外一律 000。
+- **白名單是 per-exact-host**：`github.com`→200，但 `api.github.com`→**000**；`files.pythonhosted.org`/`registry.npmjs.org`→200；`example.com`→000。與 `egressAllowedDomains` 列的精確主機名逐一吻合（`github.com` 在列、`api.github.com` 不在列）。
+- **實務**：想用 bash curl 打第三方/SaaS API 的 POST **預設會失敗**（其主機不在那 23 條白名單）；要呼叫外部服務/抓網頁的正規路徑是 `web_fetch`/`WebSearch`/對應 MCP connector，且政策上也不應用 bash curl 繞過 web 工具。
+
+**egress 白名單可由使用者擴充，但 (a) agent 不能自己改、(b) 改了要新 session 才生效（2026-06-15 使用者實測 + 我跨 session 驗證）**
+
+問題起點：使用者問「白名單可以加入 api.github.com 嗎」→ 我先答「agent 不能加；個人帳號可能沒有使用者開關」。使用者隨後**調整 Cowork 設定並新開 session「GitHub API connectivity test」**，回報 `api.github.com` 通了。
+
+- **驗證**：用 `session_info.read_transcript` 讀該 session（`local_aaa2ee6b-…`）→ 內有 `POST https://api.github.com/markdown` 回 **HTTP 200**（~0.4s，正常渲染 HTML）。確認 `api.github.com` 在新 session 從 sandbox 出得去。
+- **更正先前過度宣稱**：原說「個人帳號通常沒有自由新增主機的使用者開關」**有誤**——Cowork **確有**讓使用者擴充 egress 白名單的設定。**UI 位置：File → Settings → Capability → Domain allowlist**（使用者 2026-06-15 提供）。即 `egressAllowedDomains` 那 23 條是預設底，使用者於此處新增的網域（如 `api.github.com`）會併入新 session 的清單。
+- **仍成立**：「**agent 不能自行修改 egress 白名單**」不變（沙盒含容核心，見下方）。
+- **印證「白名單 = session 啟動時 config 快照」**：使用者改設定後，**改設定前就已開啟的本 session 仍擋** `api.github.com`（重打多次皆 000），**新開的 session 才吃到擴充後的清單** → egress allowlist 在 session 建立當下由 App 層定版，不會對既存 session 即時生效。對應 `egressAllowedDomains` 是寫在各 session 的 `local_{uuid}.json`（per-session 狀態檔，見 binary.md）。
+
 ### 完整 egress allowlist（binary 層證實）
 
 來源：App 層 session 狀態檔 `local_{uuid}.json` 的 `egressAllowedDomains`（23 條）。此欄位由 App 層管理（`egressAllowedDomains` 字串在 app.asar，見 [binary.md](binary.md)）：

@@ -9,7 +9,7 @@
 ## [tools.md](tools.md) — 工具系統
 
 - **Pre-loaded / Deferred 分類**：與 Claude Code 同機制、不同組合；無 Bash/TodoWrite，改用 `mcp__workspace__bash` 與 TaskCreate 系列
-- **ToolSearch**：載入前呼叫會 InputValidationError；`select:` 批次載入；回傳 `<functions>` JSONSchema
+- **ToolSearch**：`select:`/關鍵字/`+詞` 載入；回傳 `<functions>` JSONSchema。**底層 = Anthropic API server-side tool（官方文件證實）**：deferred 工具以 `defer_loading:true` 留在 `tools` 參數、只是不進 system-prompt prefix；搜到時 API 插 `tool_reference` block 並自動展開。變體 regex/BM25（`*_20251119`，引擎 2.1.170 用較舊 `tool-search-tool-2025-10-19`）；亦支援 client-side 自訂版（`[ToolSearch:optimistic]` 第一方走 server、否則 fallback）。**deferred≠不可呼叫**（無參數工具不載也能叫）。session log **不記** API request payload。已更正先前兩處 binary 推論（tools 參數內容、純 server 與否），來源：官方文件 + binary（2026-06-15）
 - **MCP 架構**：server 三種來源——平台內建（語意名 cowork/workspace/visualize/session_info...）、使用者 connector（純 uuid）、**plugin 內建（`plugin:{plugin}:{server}` 前綴，2026-06-15 新增）**；plugin 可只帶 skill / 只帶 server / 兩者皆有，清單高度依 session 帳號設定而變
 - **MCP registry 自我擴充**：search_mcp_registry → suggest_connectors 主動建議流程
 - **Skill 系統**：同 Claude Code 但唯讀快取，session 內不可修改
@@ -20,7 +20,7 @@
 - **三層架構**：Windows → Ubuntu 22.04 VM → 每次 bash 呼叫一個 bwrap（--unshare-net/--unshare-pid）
 - **每次呼叫獨立的原因**：bwrap 重新啟動，PID 1 即 bwrap
 - **路徑對映**：virtiofs + FUSE；實體位置在 MS Store 套件 LocalCache；隱藏掛載 `.claude/projects`（session JSONL，ro）、`.auto-memory`（ro）、`.claude/skills`（ro）
-- **網路 allowlist proxy**：unix socket 橋接主機端 proxy；pypi/npm/github 通、一般網站擋（curl 000）
+- **網路 allowlist proxy**：unix socket 橋接主機端 proxy；pypi/npm/github 通、一般網站擋（curl 000）；**按精確主機名放行**（`github.com` 通／`api.github.com` 擋），**與 HTTP method 無關**（POST 可用）；**使用者可在 Cowork 設定擴充白名單，但 agent 不能自改、且改了要新 session 才生效**（2026-06-15 實測）
 - 環境特徵：`SANDBOX_RUNTIME=1`、隨機人名 session slug
 - **VM 內部組成（2026-06-14 新發現）**：VM 實裝完整引擎 `/usr/local/bin/claude`（BuildID 與 cache ELF 一致）+ 活的 `coworkd` daemon（`/run/coworkd/cli-plugin.sock`）+ `cli-wrapper`；沙盒由 `@anthropic-ai/sandbox-runtime`(ASRT) 管理，實測 seccomp-bpf + cap-drop + no-new-privs。修正「VM 為笨 shell」印象
 - **agentic loop 執行位置定論（2026-06-14）**：兩顆引擎對應兩模式——**本機/hostLoopMode session 引擎跑在 host**（claude.exe），**VM/remote 模式跑 VM 內 `/usr/local/bin/claude`**。決定性證據：本 session 活躍 transcript 寫入「從 VM 唯讀」的 host `.claude/projects/`，VM 行程不可能寫之 → 引擎在 host（詳見 sandbox.md）

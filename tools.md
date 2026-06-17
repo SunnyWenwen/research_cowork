@@ -67,6 +67,69 @@ session 開始時以 `<system-reminder>` 列名稱（無 schema），對應 JSON
 - **關鍵分辨**：context 裡有沒有 schema，只影響「**模型**能否正確帶參數」，不影響「引擎**能否執行**」——真正的工具註冊與參數驗證在引擎/MCP host 端（握有所有已連接工具真實 schema）。故無參數的 deferred 工具，不載 schema 也能直接呼叫成功（見上方 deferred≠不可呼叫的更正）。
 - 一句話：**名稱走 attachment delta（system-reminder），schema 走 ToolSearch tool result**；兩者都只是「給模型看的副本」，執行端權威 schema 一直在引擎那邊。
 
+#### ★ 底層是 Anthropic API 原生 beta「tool-search-tool」（2026-06-15 binary 驗證，升級先前推論）
+
+問題起點：使用者問「打 Claude API 時 payload 到底怎麼帶 tools？session log 有嗎？」
+
+**先確認 session log 無法驗證**：引擎 JSONL **不記 API request payload**——全檔搜 `"tools"`/`"tool_choice"`/`"input_schema"`/`"system"`/`"max_tokens"` **零命中**；只記回應側（assistant message、`usage`、`requestId`）。`usage.cache_creation_input_tokens`(~33k) 間接證明有被快取的 prompt 前綴（工具定義在內），但看不到內容。live 請求亦攔不到（MITM proxy 只放行本 VM token）。
+
+**改用引擎 binary（2.1.170 字串）驗證，得到權威協議**：ToolSearch **是 Anthropic API 原生 beta，不是 harness 模擬**。
+
+| 證據字串 | 意義 |
+|---|---|
+| `tool-search-tool-2025-10-19`（與 `advanced-tool-use-2025-11-20` 相鄰） | **anthropic-beta header 名**；請求帶此 beta 才啟用 |
+| `tool_reference`（content block type） | **deferred 工具以「輕量參照」帶進請求**，非把完整 schema inline 進 `tools` |
+| `tool_search_tool_result`（與 `mcp_tool_result`/`bash_code_execution_tool_result` 同類） | 模型呼叫 tool-search 後，API **回一個夾帶完整 schema 的 result content block** |
+| `total_deferred_tools`、`getAutoToolSearchCharThreshold`、`ENABLE_TOOL_SEARCH=auto:N`（`gIq` 解析 `auto:` 前綴取字元閾值） | deferred 數計量 + 自動啟用門檻（工具定義字元數超過 N 才開） |
+| `[ToolSearch:optimistic] disabled: ANTHROPIC_BASE_URL ... not a first-party Anthropic host` / `Vertex AI does not accept the tool-search beta header` | **限第一方 host**；非第一方或 Vertex 即停用 → 證明是真 API 端 beta |
+
+**修正先前推論**：本檔上方「機制（推論，非實測）：harness 把 schema 加進 API `tools` 參數」**不夠準確**。真實機制是 API 層協議——deferred 工具以 `tool_reference` 攜帶、schema 經 tool-search round-trip 以 `tool_search_tool_result` 回傳，由 `tool-search-tool-2025-10-19` beta 啟用。先前「無參數 deferred 工具不載也能呼叫」的觀察仍相容：引擎/API 端握有所有 `tool_reference` 對應的真實 schema，呼叫只要參數合法即可路由。
+
+**對照 OpenAI `tools=`**：OpenAI 把所有 schema inline 進 `tools`，是唯一來源；Claude tool-search beta 則可大量註冊工具但多數以 `tool_reference`（名稱/指標）帶入，模型按需拉 schema（回 `tool_search_tool_result`）——把「schema 隨選載入」做進 API 協議，省 token。
+
+##### `tools` vs `tool_reference`：不同層、並存（2026-06-15 binary 驗證）
+
+問題起點：使用者問「`tool_reference` 跟 `tools` 不一樣？Claude 兩個都存在？」→ 是，不同東西、同一請求並存。
+
+| | `tools`（請求頂層參數） | `tool_reference`（content block） |
+|---|---|---|
+| 位置 | request 頂層 `tools` 陣列 | **訊息 content 內的區塊** |
+| 結構 | 完整定義：name + description + `input_schema` | `{ type:"tool_reference", tool_name:K }`（**只有工具名**） |
+| 角色 | 放「目前已啟用」工具的完整 schema | 指向「存在但 schema 未載入」的 deferred 工具 |
+
+binary 證據：`isToolReferenceBlock`、`H.type==="tool_reference"`、構造式 `H.matches.map(K=>({type:"tool_reference",tool_name:K}))`；模型限定字串 `model does not support tool_reference blocks. This feature is only available on Claude Sonnet 4+, Opus 4+, and newer models.`；`Filtering out tool_reference for unavailable tool`；compaction 註解（`tool_reference`-carrying messages 被摘要後另存 deferred 名以維持 schema filter）。
+
+運作：pre-loaded → 完整 schema 在 `tools`；deferred → 先以 `tool_reference` 區塊（僅名字）存在，經 ToolSearch 搜到後 schema 由 `tool_search_tool_result` 回傳、引擎 schema filter 才把完整定義納進後續 `tools`。故 `tool_reference` 不取代 `tools`，是 tool-search beta 額外的「輕量目錄層」，兩者並存（呼應「名字走一條通道、schema 走另一條」）。模型需 Sonnet 4+/Opus 4+ 才支援。
+
+##### 校準：tool-search 是「server 認得的協議 + client 大量編排」的混合，非純 server tool（2026-06-15）
+
+問題起點：使用者問「tool search 其實是 server side 的工具？」→ 部分對，但**先前把它等同 web_search/code_execution「伺服器託管工具」是過度宣稱**，校準如下。
+
+- **server 端確實參與（已驗證）**：beta header 須 server 認得、專屬 `tool_search_tool_result` block、**限第一方 host**（Vertex 不收此 beta header、非第一方 proxy 需轉發 `tool_reference` blocks）→ 請求要送到 Anthropic server 且由其處理。
+- **但非純 server-side 執行（校準）**：binary 有大量 **client/引擎側邏輯**——`getDeferredToolsDelta`、`clearToolSearchDescriptionCache`、`formatDeferredToolLine`、`findDeferredToolMarkerInTranscript`、`matches.map` 建 `tool_reference`、compaction 後重建 deferred 名單的 schema filter。與 `web_search`/`code_execution`（全程 server 跑、client 不執行）不同。`tool_search_tool_result` 雖與 `mcp_tool_result`(client 執行)/`bash_code_execution_tool_result`(server 執行) 並列，但該群本身混合，無法據此斷定純 server。
+- **無法從字串斷定（標為未解）**：實際「query→比對出哪些工具」計算跑在 server 或 client。有 client matching 跡象，server 亦參與；硬下定論即推論。
+- **結論**：tool-search ≈ **API 協議層 beta（server 認得）+ 引擎端編排** 的混合工具，不宜簡化為「純 server tool」。先前在本檔/對話把它與 web_search 並列為「server/managed tool」**據此更正**。
+
+##### ★★ 官方文件校正（2026-06-15，來源：platform.claude.com `tool-search-tool`，權威）
+
+使用者提供官方文件 URL → 讀後**更正上方兩處 binary 推論**，並補齊機制。
+
+**更正 A：deferred 工具的完整 schema 一直在 `tools` 參數裡（推翻上方 `tools` vs `tool_reference` 表的「tools 只放已啟用」說法）**
+- 官方機制：**所有**工具（含 deferred）都放在 request 的 `tools` 參數，deferred 者加旗標 **`defer_loading: true`**（這才是「標記為 deferred」的真正 API 手段）。
+- 被藏起來的是 **system-prompt prefix**（模型實際 attend 的那份），**不是 `tools` 參數**。原文：「Deferred tools are not included in the system-prompt prefix. When the model discovers a deferred tool through tool search, the API appends a `tool_reference` block inline in the conversation, then expands it into the full tool definition... The prefix is untouched, so prompt caching is preserved.」
+- 故完整 schema 始終在 `tools`（API 要用它自動展開 `tool_reference`、strict-mode grammar 也由完整 toolset 建）。**原本「搜到才把 schema 納入 tools」的描述錯誤——應為「搜到才放進模型可見的 prefix；tools 參數自始即全有」。**
+- 至少要有一個工具**非** deferred（否則 400 `All tools have defer_loading set`）；建議把最常用 3–5 個設非 deferred；tool-search 工具本身**絕不可** `defer_loading`。
+
+**更正 B：built-in tool search 確實是 server-side 工具（推翻上方「非純 server / 混合」的過度校準）**
+- 原文：「Although this is provided as a **server-side tool**, you can also implement your own **client-side tool search** functionality.」→ built-in 本體 = server-side。
+- 兩個 server 變體：**regex** `tool_search_tool_regex_20251119`（Claude 寫 Python `re.search` 패턴，≤200 字）、**BM25** `tool_search_tool_bm25_20251119`（自然語言）。
+- **client-side 自訂版**也支援：自寫搜尋工具、回標準 `tool_result` 夾 `tool_reference` blocks（每個 referenced 工具須在 `tools` 有對應 `defer_loading:true` 定義）。
+- 這解釋了 binary 同時有 server 路徑（beta header、host gating、`tool_search_tool_result`）與 client 路徑（`matches.map(K=>({type:"tool_reference",tool_name:K}))`）＋`[ToolSearch:optimistic]`：**第一方 host 走 server-side，否則 fallback client-side**。故「混合」指「引擎兩條路徑都備」，但 built-in 搜尋本體是 server-side——更正先前「不宜稱純 server」的措辭。
+
+**回應格式（官方）**：`server_tool_use`（Claude 呼叫搜尋工具）→ `tool_search_tool_result`（內含 `tool_search_tool_search_result.tool_references[]`，每個 `{type:"tool_reference",tool_name}`）→ API 自動展開為完整定義 → `tool_use` 呼叫該工具。用量記 `server_tool_use.tool_search_requests`。
+
+**版本/模型差（binary vs 官方）**：本專案 grep 的引擎 2.1.170 用**較舊** `tool-search-tool-2025-10-19`（單一 beta）；現行官方已是 `*_20251119` 且分 regex/BM25 兩變體。模型支援官方列 **Fable 5、Mythos 5、Mythos Preview、Sonnet 4.0+、Opus 4.0+、Haiku 4.5+**（binary 字串僅見 Sonnet4+/Opus4+）。catalog 上限 1 萬、每搜回 3–5、ZDR 適用。
+
 ### 「目前已載入哪些 schema」沒有可查詢的登記處（2026-06-15 實測）
 
 問題起點：使用者問「你怎麼知道當前已載入哪些 tool 的 schema？有額外的地方紀錄嗎？」
