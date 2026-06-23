@@ -1712,21 +1712,26 @@ const initialSlideParam = new URLSearchParams(location.search).get('slide');
 const initialSlide = initialSlideParam ? Number(initialSlideParam) - 1 : 0;
 go(Number.isFinite(initialSlide) ? initialSlide : 0);
 </script>
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-<script>lucide.createIcons();</script>
+<!-- 图标:本简报未使用 lucide 图标,移除外部 unpkg 依赖以支持离线/内网开启 -->
+<script>if(typeof lucide!=='undefined') lucide.createIcons();</script>
 
-<!-- Motion One 动效引擎 (与原模板一致) -->
+<!-- Motion One 动效引擎:本机 UMD 版,无需联网(避免内网封锁 CDN 时 top-level await 卡死) -->
+<script src="./assets/motion.min.js"></script>
 <script type="module">
 let motion;
-try {
-  motion = await import('./assets/motion.min.js');
-} catch(e1) {
+if(window.Motion){
+  motion = window.Motion;            // 本机 UMD 已载入,离线可用
+} else {
   try {
-    motion = await import('https://cdn.jsdelivr.net/npm/motion@11.11.17/+esm');
-  } catch(e2) {
-    console.warn('[motion] local + CDN both failed, disabling animations', e1, e2);
-    document.querySelectorAll('[data-anim]').forEach(el=>{el.style.opacity='1';el.style.transform='none'});
-    document.querySelectorAll('[data-animate="pipeline"] [data-anim]').forEach(el=>el.style.opacity='1');
+    motion = await import('./assets/motion.min.js');
+  } catch(e1) {
+    try {
+      motion = await import('https://cdn.jsdelivr.net/npm/motion@11.11.17/+esm');
+    } catch(e2) {
+      console.warn('[motion] local + CDN both failed, disabling animations', e1, e2);
+      document.querySelectorAll('[data-anim]').forEach(el=>{el.style.opacity='1';el.style.transform='none'});
+      document.querySelectorAll('[data-animate="pipeline"] [data-anim]').forEach(el=>el.style.opacity='1');
+    }
   }
 }
 
