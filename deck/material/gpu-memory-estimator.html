@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU 記憶體估算器</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --panel2:#1e222e; --line:#2a2f3d;
+    --text:#e7e9ee; --muted:#9aa3b2; --accent:#6ea8fe; --accent2:#7ee0c0;
+    --weights:#6ea8fe; --grad:#f6c177; --opt:#c792ea; --act:#7ee0c0; --over:#8a93a6;
+    --warn:#ff6b6b; --ok:#7ee0c0;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang TC","Microsoft JhengHei",sans-serif;
+    line-height:1.5;padding:24px}
+  .wrap{max-width:920px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h2{font-size:14px;margin:0 0 14px;color:var(--muted);font-weight:600;letter-spacing:.3px;text-transform:uppercase}
+  label{display:block;font-size:13px;margin:14px 0 6px;color:var(--text)}
+  label:first-of-type{margin-top:0}
+  .val{color:var(--accent);font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;accent-color:var(--accent);margin:2px 0}
+  input[type=number]{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:8px 10px;font-size:14px;font-variant-numeric:tabular-nums}
+  .seg{display:flex;gap:6px;background:var(--panel2);padding:4px;border-radius:10px}
+  .seg button{flex:1;background:transparent;border:none;color:var(--muted);padding:8px;border-radius:7px;
+    font-size:13px;cursor:pointer;transition:.15s}
+  .seg button.on{background:var(--accent);color:#06121f;font-weight:600}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .chk{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:13px;color:var(--text);cursor:pointer}
+  .chk input{accent-color:var(--accent);width:16px;height:16px}
+  .hint{font-size:11px;color:var(--muted);margin-top:4px}
+  /* results */
+  .total{font-size:40px;font-weight:700;letter-spacing:-1px;margin:4px 0}
+  .total small{font-size:16px;color:var(--muted);font-weight:500}
+  .bar{display:flex;height:26px;border-radius:7px;overflow:hidden;margin:14px 0 10px;background:var(--panel2)}
+  .bar span{transition:width .25s}
+  .legend{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+  .leg{display:flex;align-items:center;font-size:13px;justify-content:space-between}
+  .leg .l{display:flex;align-items:center;gap:8px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .leg .v{font-variant-numeric:tabular-nums;color:var(--muted)}
+  .gpus{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+  .gpu{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:6px 0}
+  .pill{font-size:11px;padding:2px 9px;border-radius:20px;font-weight:600}
+  .pill.fit{background:rgba(126,224,192,.15);color:var(--ok)}
+  .pill.no{background:rgba(255,107,107,.15);color:var(--warn)}
+  .pill.tight{background:rgba(246,193,119,.18);color:#f6c177}
+  .note{font-size:11px;color:var(--muted);margin-top:16px;line-height:1.6}
+  select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>GPU 記憶體估算器</h1>
+  <div class="sub">輸入模型與訓練參數,即時估算大概需要多少 VRAM。所有數字為粗略估計,實際用量受框架、kernel 與 fragmentation 影響。</div>
+
+  <div class="grid">
+    <!-- INPUTS -->
+    <div class="card">
+      <h2>輸入</h2>
+
+      <label>模式</label>
+      <div class="seg" id="mode">
+        <button data-v="inference" class="on">推論 Inference</button>
+        <button data-v="training">訓練 Training</button>
+      </div>
+
+      <label>精度 Precision</label>
+      <div class="seg" id="prec">
+        <button data-v="2" class="on">FP16 / BF16</button>
+        <button data-v="4">FP32</button>
+      </div>
+
+      <label>模型參數量 <span class="val" id="pLab">7 B</span></label>
+      <input type="range" id="pSlider" min="0.1" max="180" step="0.1" value="7">
+      <input type="number" id="pNum" min="0.001" step="0.1" value="7" style="margin-top:8px">
+      <div class="hint">單位:十億參數 (Billion)。可直接輸入,例如 0.125、13、70、405</div>
+
+      <div class="row2">
+        <div>
+          <label>Batch size <span class="val" id="bLab">1</span></label>
+          <input type="range" id="bSlider" min="1" max="64" step="1" value="1">
+        </div>
+        <div>
+          <label>序列長度 <span class="val" id="sLab">2048</span></label>
+          <input type="range" id="sSlider" min="128" max="32768" step="128" value="2048">
+        </div>
+      </div>
+
+      <label class="chk"><input type="checkbox" id="advChk"> 進階:自訂架構 (hidden size / 層數)</label>
+      <div id="adv" style="display:none">
+        <div class="row2" style="margin-top:10px">
+          <div>
+            <label style="margin-top:0">Hidden size</label>
+            <input type="number" id="hNum" value="4096">
+          </div>
+          <div>
+            <label style="margin-top:0">層數 Layers</label>
+            <input type="number" id="lNum" value="32">
+          </div>
+        </div>
+        <div class="hint">留空時依參數量自動估算典型 Transformer 架構</div>
+      </div>
+
+      <label class="chk" id="ckptWrap" style="display:none"><input type="checkbox" id="ckptChk"> 啟用 activation checkpointing (省記憶體,訓練)</label>
+      <label class="chk" id="optWrap" style="display:none"><input type="checkbox" id="optChk" checked> Adam 優化器 (否則用 SGD)</label>
+    </div>
+
+    <!-- RESULTS -->
+    <div class="card">
+      <h2>估算結果</h2>
+      <div class="total"><span id="totalNum">0</span> <small>GB</small></div>
+      <div class="bar" id="bar"></div>
+      <div class="legend" id="legend"></div>
+
+      <div class="gpus" id="gpus"></div>
+
+      <div class="note" id="note"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const state = {
+  mode:'inference', bytes:2, params:7, batch:1, seq:2048,
+  adv:false, h:4096, l:32, ckpt:false, adam:true
+};
+
+// 依參數量估算典型 transformer 的 hidden size 與層數
+function estimateArch(P){ // P in billions
+  const table = [
+    [0.125, 768, 12], [0.35, 1024, 24], [0.76, 1536, 24], [1.3, 2048, 24],
+    [2.7, 2560, 32], [6.7, 4096, 32], [13, 5120, 40], [30, 6656, 60],
+    [33, 6656, 60], [65, 8192, 80], [70, 8192, 80], [175, 12288, 96], [405, 16384, 126]
+  ];
+  let best = table[0];
+  for(const row of table){ if(P >= row[0]) best = row; }
+  return {h:best[1], l:best[2]};
+}
+
+const GPUs = [
+  ['RTX 4090 / 3090', 24], ['RTX 5090', 32], ['A100 40GB', 40],
+  ['A100 / H100 80GB', 80], ['H200 141GB', 141], ['8× H100 (640GB)', 640]
+];
+
+const fmt = x => x>=100 ? x.toFixed(0) : x>=10 ? x.toFixed(1) : x.toFixed(2);
+
+function compute(){
+  const P = state.params * 1e9;
+  const bpp = state.bytes;
+  let h, l;
+  if(state.adv){ h = state.h; l = state.l; }
+  else { const a = estimateArch(state.params); h = a.h; l = a.l; }
+
+  const GB = 1024**3;
+  const parts = [];
+
+  if(state.mode === 'inference'){
+    const weights = P * bpp;
+    // KV cache: 2 (K,V) * layers * seq * hidden * batch * bytes
+    const kv = 2 * l * state.seq * h * state.batch * bpp;
+    const overhead = weights * 0.05 + 1.2e9; // CUDA context + buffers
+    parts.push(['模型權重 Weights', weights, 'var(--weights)']);
+    parts.push(['KV cache', kv, 'var(--act)']);
+    parts.push(['框架開銷 Overhead', overhead, 'var(--over)']);
+  } else {
+    // training (mixed precision if fp16)
+    let weights, master = 0, grads, opt;
+    if(bpp === 2){
+      weights = P * 2;          // fp16 weights
+      master  = P * 4;          // fp32 master copy
+      grads   = P * 2;          // fp16 grads
+    } else {
+      weights = P * 4;          // fp32 weights
+      grads   = P * 4;          // fp32 grads
+    }
+    opt = state.adam ? P * 8 : P * 4; // Adam: m+v fp32 (8); SGD momentum (4)
+
+    // activations ~ layers * seq * batch * hidden * factor
+    let act = l * state.seq * state.batch * h * 16; // ~ bytes, fp16 activations w/ attention
+    if(state.ckpt) act = Math.sqrt(l) * state.seq * state.batch * h * 16; // checkpointing
+    const overhead = 1.5e9;
+
+    parts.push(['模型權重 Weights', weights + master, 'var(--weights)']);
+    parts.push(['梯度 Gradients', grads, 'var(--grad)']);
+    parts.push(['優化器狀態 Optimizer', opt, 'var(--opt)']);
+    parts.push(['Activations', act, 'var(--act)']);
+    parts.push(['框架開銷 Overhead', overhead, 'var(--over)']);
+  }
+
+  const total = parts.reduce((s,p)=>s+p[1],0);
+  render(parts, total, GB, h, l);
+}
+
+function render(parts, total, GB, h, l){
+  document.getElementById('totalNum').textContent = fmt(total/GB);
+  const bar = document.getElementById('bar'); bar.innerHTML='';
+  const leg = document.getElementById('legend'); leg.innerHTML='';
+  parts.forEach(([name,val,color])=>{
+    const pct = (val/total*100);
+    const s = document.createElement('span');
+    s.style.width = pct+'%'; s.style.background = color; bar.appendChild(s);
+    const row = document.createElement('div'); row.className='leg';
+    row.innerHTML = `<span class="l"><span class="dot" style="background:${color}"></span>${name}</span>`+
+                    `<span class="v">${fmt(val/GB)} GB &nbsp;<span style="opacity:.6">${pct.toFixed(0)}%</span></span>`;
+    leg.appendChild(row);
+  });
+
+  // GPU fit
+  const totGB = total/GB;
+  const g = document.getElementById('gpus'); g.innerHTML='';
+  GPUs.forEach(([name,mem])=>{
+    let cls='fit', txt='可放下';
+    if(totGB > mem){ cls='no'; txt='放不下'; }
+    else if(totGB > mem*0.85){ cls='tight'; txt='勉強'; }
+    const row=document.createElement('div'); row.className='gpu';
+    row.innerHTML=`<span>${name} <span style="color:var(--muted)">${mem}GB</span></span><span class="pill ${cls}">${txt}</span>`;
+    g.appendChild(row);
+  });
+
+  document.getElementById('note').innerHTML =
+    `使用架構估算:hidden size <b>${h}</b>、層數 <b>${l}</b>。`+
+    (state.mode==='training'
+      ? ' 訓練估算採混合精度 + Adam 經驗值(約每參數 16–18 bytes),activation 為近似值,實際依框架(DeepSpeed/FSDP)與重算策略而異。'
+      : ' 推論含 KV cache,長序列或大 batch 時 KV cache 會成為主要開銷。');
+}
+
+// ---- wiring ----
+function seg(id, key, cast){
+  document.querySelectorAll(`#${id} button`).forEach(b=>{
+    b.onclick=()=>{
+      document.querySelectorAll(`#${id} button`).forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      state[key] = cast(b.dataset.v);
+      if(key==='mode') toggleMode();
+      compute();
+    };
+  });
+}
+function toggleMode(){
+  const t = state.mode==='training';
+  document.getElementById('ckptWrap').style.display = t?'flex':'none';
+  document.getElementById('optWrap').style.display = t?'flex':'none';
+}
+seg('mode','mode',v=>v);
+seg('prec','bytes',v=>+v);
+
+const pS=document.getElementById('pSlider'), pN=document.getElementById('pNum'), pL=document.getElementById('pLab');
+function setP(v){ v=Math.max(0.001,v); state.params=v; pL.textContent=fmt(v)+' B';
+  if(+pN.value!==v)pN.value=v; if(+pS.value!==v && v<=180)pS.value=v; compute(); }
+pS.oninput=e=>setP(+e.target.value);
+pN.oninput=e=>setP(+e.target.value);
+
+const bS=document.getElementById('bSlider'), bL=document.getElementById('bLab');
+bS.oninput=e=>{state.batch=+e.target.value; bL.textContent=e.target.value; compute();};
+const sS=document.getElementById('sSlider'), sL=document.getElementById('sLab');
+sS.oninput=e=>{state.seq=+e.target.value; sL.textContent=(+e.target.value).toLocaleString(); compute();};
+
+document.getElementById('advChk').onchange=e=>{
+  state.adv=e.target.checked;
+  document.getElementById('adv').style.display=e.target.checked?'block':'none';
+  compute();
+};
+document.getElementById('hNum').oninput=e=>{state.h=+e.target.value; compute();};
+document.getElementById('lNum').oninput=e=>{state.l=+e.target.value; compute();};
+document.getElementById('ckptChk').onchange=e=>{state.ckpt=e.target.checked; compute();};
+document.getElementById('optChk').onchange=e=>{state.adam=e.target.checked; compute();};
+
+compute();
+</script>
+</body>
+</html>
