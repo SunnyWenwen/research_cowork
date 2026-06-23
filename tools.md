@@ -163,6 +163,19 @@ binary 證據：`isToolReferenceBlock`、`H.type==="tool_reference"`、構造式
 
 → 三種可由名稱一眼區分：**語意名 = 平台**、**純 uuid = 使用者 connector**、**`plugin:` 前綴 = plugin 隨附**。
 
+#### ★ 使用者自己的 MCP server 一律 deferred，永不 pre-loaded（2026-06-23 即時內省，Opus 4.8）
+
+問題起點：使用者問「自己的 MCP server 載入 Cowork 時會是 deferred 嗎？」
+
+**結論：會，必定 deferred。** 使用者 connector（uuid 命名）與 plugin-bundled（`plugin:` 前綴）的工具**都只走 deferred 通道，從不進 pre-loaded**。pre-loaded 名額僅留給平台高頻內建工具（引擎原生 + `workspace__bash`/`web_fetch`/`cowork__present_files`/`visualize`，見 §A 權威清單）——第三方工具排不進去。
+
+機制（與 §「名稱走 attachment delta、schema 走 ToolSearch」一致）：
+1. 開場 `<system-reminder>` deferred 名單**只列工具名、無 schema**；外接 server 常先標 **"still connecting"**，連上後再經 JSONL `deferred_tools_delta`（`addedNames`，`pendingMcpServers` 欄位）陸續補入 → 證明 deferred 名單是**會變動的執行期狀態**，外接 server 是「事後加入」而非開場寫死。
+2. 要用得先 `ToolSearch` 載 schema（對**有必填參數**的工具是必須；無參數工具沿用「deferred≠不可呼叫」可直接叫，見 §更正）。
+3. OAuth 類 connector 連上後常先露 `authenticate`/`complete_authentication` 一對工具。
+
+**即時證據（本 session）**：`github` MCP server 即以此模式載入——開場 system-reminder 先報「still connecting」，隨後一次補進 **55 個 `mcp__github__*` 工具，僅名稱無 schema**，呼叫前須 ToolSearch。為「使用者自己的 MCP server = deferred」的活樣本。
+
 ### Plugin 內建 MCP server（2026-06-15 即時內省）
 
 本 session 安裝了 `engineering` 與 `finance` 兩個 plugin，各自 **bundle 了一組 MCP server**：

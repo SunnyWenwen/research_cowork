@@ -10,7 +10,7 @@
 
 - **Pre-loaded / Deferred 分類**：與 Claude Code 同機制、不同組合；無 Bash/TodoWrite，改用 `mcp__workspace__bash` 與 TaskCreate 系列
 - **ToolSearch**：`select:`/關鍵字/`+詞` 載入；回傳 `<functions>` JSONSchema。**底層 = Anthropic API server-side tool（官方文件證實）**：deferred 工具以 `defer_loading:true` 留在 `tools` 參數、只是不進 system-prompt prefix；搜到時 API 插 `tool_reference` block 並自動展開。變體 regex/BM25（`*_20251119`，引擎 2.1.170 用較舊 `tool-search-tool-2025-10-19`）；亦支援 client-side 自訂版（`[ToolSearch:optimistic]` 第一方走 server、否則 fallback）。**deferred≠不可呼叫**（無參數工具不載也能叫）。session log **不記** API request payload。已更正先前兩處 binary 推論（tools 參數內容、純 server 與否），來源：官方文件 + binary（2026-06-15）
-- **MCP 架構**：server 三種來源——平台內建（語意名 cowork/workspace/visualize/session_info...）、使用者 connector（純 uuid）、**plugin 內建（`plugin:{plugin}:{server}` 前綴，2026-06-15 新增）**；plugin 可只帶 skill / 只帶 server / 兩者皆有，清單高度依 session 帳號設定而變
+- **MCP 架構**：server 三種來源——平台內建（語意名 cowork/workspace/visualize/session_info...）、使用者 connector（純 uuid）、**plugin 內建（`plugin:{plugin}:{server}` 前綴，2026-06-15 新增）**；plugin 可只帶 skill / 只帶 server / 兩者皆有，清單高度依 session 帳號設定而變。**使用者自己的 / plugin 的 MCP server 工具一律 deferred、永不 pre-loaded**（開場 system-reminder 只列名、常先 "still connecting" 再經 deferred_tools_delta 補入；本 session github MCP 55 工具即此模式，2026-06-23）
 - **MCP registry 自我擴充**：search_mcp_registry → suggest_connectors 主動建議流程
 - **Skill 系統**：同 Claude Code 但唯讀快取，session 內不可修改
 - **與 Claude Code 差異總表**
