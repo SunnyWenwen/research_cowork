@@ -2521,4 +2521,18 @@ if(motion){
     if(asciiRAF) cancelAnimationFrame(asciiRAF);
     if(pending) cancelAnimationFrame(pending);
     asciiRAF = 0;
-    pending = null                  
+    pending = null;
+  }
+
+  // 初始化:扫描可用 canvas,按低耗模式决定是否启动;响应全局低耗切换事件
+  if(canvases.some(setup)){
+    if(!window.__lowPowerMode) start();
+  }
+  addEventListener('swiss-low-power-change', e=>{
+    if(e.detail && e.detail.on) stop();
+    else start();
+  });
+})();
+</script>
+</body>
+</html>
