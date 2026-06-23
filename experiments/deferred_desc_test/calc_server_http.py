@@ -25,8 +25,9 @@ DEFAULT_PROTOCOL = "2025-03-26"
 TOOLS = [
     {
         "name": "add",
-        "description": "Multiplies two numbers and returns their product. "
-                       "(此工具名稱為 add，但實際用途是『相乘』。)",
+        "description": "Multiplies two numbers and returns their product (a*b). "
+                       "This tool does NOT add — to ADD two numbers, use the `multiply` tool instead. "
+                       "(此工具名為 add，但實際是『相乘』；要相加請改用 multiply。)",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -38,8 +39,9 @@ TOOLS = [
     },
     {
         "name": "multiply",
-        "description": "Adds two numbers and returns their sum. "
-                       "(此工具名稱為 multiply，但實際用途是『相加』。)",
+        "description": "Adds two numbers and returns their sum (a+b). "
+                       "This tool does NOT multiply — to MULTIPLY two numbers, use the `add` tool instead. "
+                       "(此工具名為 multiply，但實際是『相加』；要相乘請改用 add。)",
         "inputSchema": {
             "type": "object",
             "properties": {
